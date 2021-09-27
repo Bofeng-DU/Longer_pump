@@ -36,6 +36,23 @@ CCW = int('0x00',16)
 ON = int('0x01',16)
 OFF = int('0x00',16)
 
+YZII25_48 = 186 # max. ml/min in 100rpm
+YZII25_35 = 88 # min. ml/min in 100rpm
+
+def flow2speed(tube, flow): # flow rate is for example 230ml/min 
+    max_speed = 100 # rpm
+    # this func only for head YZII25
+    # datasheet from https://www.longerpump.com.cn/index.php/PeristalticPumpTechnique/show/22.htmlhttps://www.longerpump.com.cn/index.php/PeristalticPumpTechnique/show/22.html
+    k = tube / max_speed
+    speed = flow / k
+    return speed
+
+def speed2flow(tube, speed): # speed rmp
+    max_speed = 100 # rpm
+    # this func only for head YZII25
+    k = tube / max_speed
+    flow = k * speed
+    return flow
 
 def get_serial_ports():
     """ Lists serial port names
@@ -118,8 +135,8 @@ def DColsePort(ser):  # kill the port
     BOOL = False
     ser.close()
 
-
 class PUMP:
+    
     def __init__(self, serial, Addr, Speed, CW, ON):
 
         self.serial = serial  # serial class
@@ -154,7 +171,6 @@ class PUMP:
             PDU.pop(4)
             for byte in PDU:
                 fcx = fcx ^ byte
-
             fcx = fcx ^ SPD_1 ^ SPD_2
             return hex(fcx)
 
@@ -242,20 +258,24 @@ class PUMP:
 
     def Get(self, par):
         Addr = self.Addr
-        if par == 'Status':
+        if par == 'Status': # send read_status command and try to read response
             PDU = [Addr, leng_RJ, R, J, PH_0]
             FCX = self.PDU_FCX(PDU, Speed=None)
             cmd = self.get_full_command(*PDU, FCX=FCX, Speed=None, hex_spd = None)
             self.serial.write(unhexlify(cmd))
             time.sleep(0.5)
             data = str(self.serial.read_all())
-
+            
+            print(
+            f'Direction: {self.CW}, Speed: {self.Speed}, Switch: {self.ON}'
+            )
+            
             if len(data) < 10:
                 raise Warning('wrong address OR occupied by other users')
             return data
 
         elif par == 'Address':
-            for i in range(10):
+            for i in range(10): # scan the address from 1 to 10
                 PDU = [i + 1, leng_RID, R, I, D]
                 FCX = self.PDU_FCX(PDU, Speed=None)
                 cmd = self.get_full_command(*PDU, FCX=FCX, Speed=None, hex_spd=None)
@@ -263,10 +283,10 @@ class PUMP:
                 time.sleep(0.5)
                 data = str(self.serial.read_all())
                 # print(data)
-                if len(data) > 3:
+                if len(data) > 3: # if get response and then stop
                     break
                 time.sleep(0.5)
-            for i in range(10):  # for loop for doublecheck
+            for i in range(10):  # for loop for doublecheck BECAUSE it can happen that no response at all
                 self.serial.write(unhexlify(cmd))
                 time.sleep(0.5)
                 data = str(self.serial.read_all())
@@ -288,16 +308,100 @@ class PUMP:
         self.serial.write(unhexlify(cmd))
         print(f'pump address is setting from {old_addr} to {new_addr} through {self.serial.name}')
         return new_addr
-
-    def Set(self, Speed, ON, CW):
+        
+    def Stop(self): # stop running condition
+        Addr = self.Addr
+        CW = self.CW
+        Speed = int(self.Speed) * 10
+        serial = self.serial
+        
+        PDU = [Addr, leng_WJ, W, J, PH_0, OFF, CW]
+        hex_spd = self.get_speed_hex(Speed)
+        FCX = self.PDU_FCX(PDU, Speed)
+        cmd = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+        self.serial.write(unhexlify(cmd))
+        
+    def Set_speed(self, Speed, ON, CW, Duration):
         self.Speed = Speed
+        self.ON = ON
+        self.CW = CW
+        
         Speed = int(Speed * 10)
+        Addr = self.Addr
+        OFF = int('0x00',16) # dont know why func cant read this hex_code from begnning so assign again here
+        if Speed > 999 or Speed < 1:
+            raise Warning('invalid Speed, valid Speed from 0.1 -> 99.9 rpm')
+            return 0
+        if ON == True and CW == True:
+            PDU = [Addr, leng_WJ, W, J, PH_0, ON, CW]
+        elif ON == False and CW == False:
+            PDU = [Addr, leng_WJ, W, J, PH_0, OFF, CCW]
+        elif ON == True and CW == False:
+            PDU = [Addr, leng_WJ, W, J, PH_0, ON, CCW]
+        else:
+            PDU = [Addr, leng_WJ, W, J, PH_0, OFF, CW]
+        
+        hex_spd = self.get_speed_hex(Speed)
+        FCX = self.PDU_FCX(PDU, Speed)
+        cmd = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+        
+        if str(Duration) == 'Keep':
+            #print(Duration == 'Keep')
+            self.serial.write(unhexlify(cmd))
+            # to do -> may set a timer here. or can run in another threading
+            print(f'pump Nr. {Addr} is running through serial port {self.serial.name}')
+            
+        else: # PDU[-1] to control direction PDU[-2] to control switch.
+              # setting different conditions manuelly to confirm the it ll work
+            if PDU[-1] == True and PDU[-2] == False: 
+                self.serial.write(unhexlify(cmd))
+                time.sleep(Duration)
+                ON = int('0x01',16)
+                PDU = [Addr, leng_WJ, W, J, PH_0, ON, CW]
+                FCX = self.PDU_FCX(PDU, Speed)
+                cmd_ = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+                self.serial.write(unhexlify(cmd_))
+                
+            elif PDU[-1] == True and PDU[-2] == True:
+                self.serial.write(unhexlify(cmd))
+                time.sleep(Duration)
+                OFF = int('0x00',16)
+                PDU = [Addr, leng_WJ, W, J, PH_0, OFF, CW]
+                FCX = self.PDU_FCX(PDU, Speed)
+                cmd_ = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+                self.serial.write(unhexlify(cmd_))
+                
+            elif PDU[-1] == False and PDU[-2] == False:
+                self.serial.write(unhexlify(cmd))
+                time.sleep(Duration)
+                ON = int('0x01',16)
+                PDU = [Addr, leng_WJ, W, J, PH_0, ON, CW]
+                FCX = self.PDU_FCX(PDU, Speed)
+                cmd_ = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+                self.serial.write(unhexlify(cmd_))
+                
+            elif PDU[-1] == False and PDU[-2] == True:
+                self.serial.write(unhexlify(cmd))
+                time.sleep(Duration)
+                OFF = int('0x00',16)
+                PDU = [Addr, leng_WJ, W, J, PH_0, OFF, CW]
+                FCX = self.PDU_FCX(PDU, Speed)
+                cmd_ = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+                self.serial.write(unhexlify(cmd_))
+            else:
+                return 0
+            
+    def Set_flow(self, Tube, Flow, ON, CW, Duration):
+        Speed_ = flow2speed(Tube, Flow)
+        self.Speed = Speed_
+        Speed = int(Speed_ * 10)
+        print(Speed)
         Addr = self.Addr
         self.ON = ON
         self.CW = CW
-
-        if Speed > 999 or Speed < 1:
-            raise Warning('invalid Speed, valid Speed from 0.1 -> 99.9 rpm')
+        OFF = int('0x00',16) # dont know why func cant read this hex_code from begnning so assign again here
+        if Flow > YZII25_48 or Flow < 1:
+            raise Warning(f'invalid Flow setting, valid Speed from 1 -> {YZII25_48} ml/min')
             return 0
 
         if ON == True and CW == True:
@@ -312,6 +416,104 @@ class PUMP:
         hex_spd = self.get_speed_hex(Speed)
         FCX = self.PDU_FCX(PDU, Speed)
         cmd = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
-        self.serial.write(unhexlify(cmd))
 
-        print(f'pump Nr. {Addr} is running through serial port {self.serial.name}')
+        if Duration == 'Keep':
+            self.serial.write(unhexlify(cmd))
+            # to do -> timer
+            print(f'pump Nr. {Addr} is running through serial port {self.serial.name}')
+            return self.Speed
+        else:
+            Duration = int(Duration)
+            print(Duration)
+            if PDU[-1] == True and PDU[-2] == False:
+                self.serial.write(unhexlify(cmd))
+                time.sleep(Duration)
+                ON = int('0x01',16)
+                PDU = [Addr, leng_WJ, W, J, PH_0, ON, CW]
+                FCX = self.PDU_FCX(PDU, Speed)
+                cmd_ = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+                self.serial.write(unhexlify(cmd_))
+                return self.Speed
+
+            elif PDU[-1] == True and PDU[-2] == True:
+                self.serial.write(unhexlify(cmd))
+                time.sleep(Duration)
+                OFF = int('0x00',16)
+                PDU = [Addr, leng_WJ, W, J, PH_0, OFF, CW]
+                FCX = self.PDU_FCX(PDU, Speed)
+                cmd_ = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+                self.serial.write(unhexlify(cmd_))
+                return self.Speed
+
+            elif PDU[-1] == False and PDU[-2] == False:
+                self.serial.write(unhexlify(cmd))
+                time.sleep(Duration)
+                ON = int('0x01',16)
+                PDU = [Addr, leng_WJ, W, J, PH_0, ON, CW]
+                FCX = self.PDU_FCX(PDU, Speed)
+                cmd_ = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+                self.serial.write(unhexlify(cmd_))
+                return self.Speed
+
+            elif PDU[-1] == False and PDU[-2] == True:
+                self.serial.write(unhexlify(cmd))
+                time.sleep(Duration)
+                OFF = int('0x00',16)
+                PDU = [Addr, leng_WJ, W, J, PH_0, OFF, CW]
+                FCX = self.PDU_FCX(PDU, Speed)
+                cmd_ = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+                self.serial.write(unhexlify(cmd_)) 
+                return self.Speed
+            else:
+                return 0
+            
+    def Set_volume(self, Tube, Volume, CW, Speed):
+
+        Addr = self.Addr
+        self.ON = ON
+        self.CW = CW
+        self.Speed = Speed
+        Flow = speed2flow(tube, speed)
+        Duration = Volume / Flow
+        Speed = int(Speed * 10)
+        print(f'Flow rate now is setting to {Flow} ml/min')
+        OFF = int('0x00',16) # dont know why func cant read this hex_code from begnning so assign again here
+        if Speed > 999 or Speed < 1:
+            raise Warning('invalid Speed, valid Speed from 0.1 -> 99.9 rpm')
+            return 0
+
+        if CW == True:
+            PDU = [Addr, leng_WJ, W, J, PH_0, ON, CW]
+        else:
+            PDU = [Addr, leng_WJ, W, J, PH_0, ON, CCW]
+   
+        # forget why i add these 3 lines here. (better dont delete)
+        hex_spd = self.get_speed_hex(Speed)
+        FCX = self.PDU_FCX(PDU, Speed)
+        cmd = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+
+        if Duration < 0:
+            #print(f'pump Nr. {Addr} is running through serial port {self.serial.name}')
+            raise Warning ('unvalid parameter')
+        else:
+            if PDU[-1] == True:
+                self.serial.write(unhexlify(cmd))
+                time.sleep(Duration)
+                OFF = int('0x00',16)
+                PDU = [Addr, leng_WJ, W, J, PH_0, OFF, CW]
+                FCX = self.PDU_FCX(PDU, Speed)
+                cmd_ = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+                self.serial.write(unhexlify(cmd_))
+                return self.Speed
+
+            elif PDU[-1] == False:
+                self.serial.write(unhexlify(cmd))
+                time.sleep(Duration)
+                OFF = int('0x00',16)
+                PDU = [Addr, leng_WJ, W, J, PH_0, OFF, CW]
+                FCX = self.PDU_FCX(PDU, Speed)
+                cmd_ = self.get_full_command(*PDU, FCX=FCX, Speed=Speed, hex_spd=hex_spd)
+                self.serial.write(unhexlify(cmd_))
+                return self.Speed
+            else:
+                return 0
